@@ -1,7 +1,17 @@
 import { TIERS } from './scoring.js'
 
-function TitleScreen({ goal, named, score, onContinue, onNewGame }) {
+function TitleScreen({ goal, minutes, named, score, timeLeft, onContinue, onNewGame, onLeaderboard, username, onUsernameChange }) {
   const hasSave = named > 0
+  const hasName = username.trim().length > 0
+
+  // Enter in the name field does the main action.
+  function handleSubmit(e) {
+    e.preventDefault()
+    if (!hasName) return
+    onUsernameChange(username.trim())
+    if (hasSave) onContinue()
+    else onNewGame()
+  }
 
   return (
     <div className="title-screen">
@@ -15,7 +25,9 @@ function TitleScreen({ goal, named, score, onContinue, onNewGame }) {
 
       <ol className="rules">
         <li>
-          <b>Name {goal} anime</b> — type a title and press Enter.
+          <b>
+            Name {goal} anime in {minutes} minutes
+          </b> — type a title and press Enter.
         </li>
         <li>
           <b>One per franchise.</b> Seasons, movies and spin-off OVAs don't count twice.
@@ -34,22 +46,53 @@ function TitleScreen({ goal, named, score, onContinue, onNewGame }) {
         ))}
       </ul>
 
-      <div className="title-actions">
-        {hasSave ? (
-          <>
-            <button className="start" onClick={onContinue} autoFocus>
-              Continue <small>{named}/{goal} · {score} pts</small>
+      <form className="title-form" onSubmit={handleSubmit}>
+        <label className="name-field">
+          <span>Your name</span>
+          <input
+            type="text"
+            value={username}
+            onChange={(e) => onUsernameChange(e.target.value)}
+            placeholder="Pick a username"
+            maxLength={20}
+            autoComplete="nickname"
+            spellCheck="false"
+            autoFocus={!hasName}
+          />
+        </label>
+
+        <div className="title-actions">
+          {hasSave ? (
+            <>
+              <button type="submit" className="start" disabled={!hasName} autoFocus={hasName}>
+                {timeLeft ? 'Continue' : 'See results'}{' '}
+                <small>
+                  {named}/{goal} · {score} pts{timeLeft && ` · ${timeLeft} left`}
+                </small>
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => {
+                  onUsernameChange(username.trim())
+                  onNewGame()
+                }}
+                disabled={!hasName}
+              >
+                New game
+              </button>
+            </>
+          ) : (
+            <button type="submit" className="start" disabled={!hasName} autoFocus={hasName}>
+              Start
             </button>
-            <button className="ghost" onClick={onNewGame}>
-              New game
-            </button>
-          </>
-        ) : (
-          <button className="start" onClick={onNewGame} autoFocus>
-            Start
-          </button>
-        )}
-      </div>
+          )}
+        </div>
+      </form>
+
+      <button type="button" className="link-button" onClick={onLeaderboard}>
+        🏆 Leaderboard
+      </button>
 
       <p className="title-foot">
         Popularity data from <a href="https://anilist.co">AniList</a>.

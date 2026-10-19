@@ -3,11 +3,62 @@ import EntryInput from './EntryInput.jsx'
 import TitleScreen from './TitleScreen.jsx'
 import VerdictMeter from './VerdictMeter.jsx'
 import { useDialog } from './Dialog.jsx'
+import Leaderboard from './Leaderboard.jsx'
+import { repeatMessage } from './repeats.js'
+import { fetchRank, submitScore, supabase } from './supabase.js'
 import { findAnime, relatedIds, resolveFranchise } from './api.js'
 import { TIERS, formatCount, tierFor, totalPoints, verdictFor } from './scoring.js'
 
 const GOAL = 100
 const STORAGE_KEY = 'areyoualarper:anilist'
+const USERNAME_KEY = 'areyoualarper:username'
+const ELAPSED_KEY = 'areyoualarper:elapsed'
+const TIME_LIMIT_MS = 15 * 60 * 1000
+
+const GAME_KEY = 'areyoualarper:game'
+const MY_GAMES_KEY = 'areyoualarper:my-games'
+
+// The current game's id and leaderboard status: { id, submitted, rank }.
+function newGameState() {
+  return { id: crypto.randomUUID(), submitted: false, rank: null }
+}
+
+function loadJSON(key, fallback) {
+  try {
+    return JSON.parse(localStorage.getItem(key)) ?? fallback
+  } catch {
+    return fallback
+  }
+}
+
+function saveJSON(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    // Storage unavailable; this only lasts for the visit.
+  }
+}
+
+function loadElapsed() {
+  try {
+    return Math.min(TIME_LIMIT_MS, Number(localStorage.getItem(ELAPSED_KEY)) || 0)
+  } catch {
+    return 0
+  }
+}
+
+function formatTime(ms) {
+  const total = Math.ceil(ms / 1000)
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
+}
+
+function loadUsername() {
+  try {
+    return localStorage.getItem(USERNAME_KEY) || ''
+  } catch {
+    return ''
+  }
+}
 
 function loadList() {
   try {
@@ -52,6 +103,15 @@ function claimedBy(list) {
 
 function App() {
   const [list, setList] = useState(loadList)
+  const [username, setUsername] = useState(loadUsername)
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(USERNAME_KEY, username)
+    } catch {
+      // Storage unavailable; the name lasts for this visit only.
+    }
+  }, [username])
   const [copied, setCopied] = useState(false)
 
   useEffect(() => {
@@ -62,10 +122,17 @@ function App() {
     }
   }, [list])
 
-  const [screen, setScreen] = useState('title') // 'title' | 'game'
+  const [screen, setScreen] = useState('title') // 'title' | 'game' | 'leaderboard'
+  const [game, setGame] = useState(() => loadJSON(GAME_KEY, null) ?? newGameState())
+  const [myGameIds, setMyGameIds] = useState(() => new Set(loadJSON(MY_GAMES_KEY, [])))
+  const [submitError, setSubmitError] = useState(false)
+  const submitting = useRef(false)
+
+  useEffect(() => saveJSON(GAME_KEY, game), [game])
+  useEffect(() => saveJSON(MY_GAMES_KEY, [...myGameIds]), [myGameIds])
   const [dialog, ask] = useDialog()
   const [pending, setPending] = useState(false)
-  const [notice, setNotice] = useState(null) // { kind: 'ok' | 'error', text }
+  const [notice, setNotice] = useState(null) // { kind: 'ok' | 'error' | 'repeat', text }
 
   // Mirrors `list` synchronously so async checks always see the latest list.
   const listRef = useRef(list)
@@ -95,6 +162,65 @@ function App() {
   }
   const done = list.length >= GOAL
 
+  // Countdown. Only time spent on the game screen counts; it is saved so a
+  // continued game resumes where it left off.
+  const [elapsed, setElapsed] = useState(loadElapsed)
+  const elapsedRef = useRef(elapsed)
+  const remaining = TIME_LIMIT_MS - elapsed
+  const timeUp = remaining <= 0
+  const finished = done || timeUp
+
+  function setElapsedNow(ms) {
+    elapsedRef.current = ms
+    setElapsed(ms)
+    try {
+      localStorage.setItem(ELAPSED_KEY, String(ms))
+    } catch {
+      // Storage unavailable; the clock resets on reload.
+    }
+  }
+
+  useEffect(() => {
+    if (screen !== 'game' || finished) return
+    const base = elapsedRef.current
+    const startedAt = Date.now()
+    const timer = setInterval(() => {
+      setElapsedNow(Math.min(TIME_LIMIT_MS, base + Date.now() - startedAt))
+    }, 250)
+    return () => clearInterval(timer)
+  }, [screen, finished])
+
+  // Submit a finished game once, after every pick's franchise check settles
+  // so the score is final.
+  const settled = list.every((a) => !a.resolving)
+  async function submit() {
+    if (submitting.current) return
+    submitting.current = true
+    setSubmitError(false)
+    try {
+      await submitScore({
+        gameId: game.id,
+        username,
+        score,
+        named: list.length,
+        timeMs: elapsed,
+        verdict: verdict.title,
+      })
+      const rank = await fetchRank(score, elapsed).catch(() => null)
+      setGame((g) => ({ ...g, submitted: true, rank }))
+      setMyGameIds((ids) => new Set(ids).add(game.id))
+    } catch {
+      setSubmitError(true)
+    } finally {
+      submitting.current = false
+    }
+  }
+
+  useEffect(() => {
+    if (finished && settled && list.length > 0 && !game.submitted && supabase && !submitError) submit()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [finished, settled, game.submitted])
+
   // Verifies a typed name and adds it. Resolves to 'added', 'duplicate',
   // 'missing' or 'error' (the input clears on the first two).
   async function add(name) {
@@ -113,7 +239,7 @@ function App() {
       const claimed = claimedBy(listRef.current)
       const clash = [anime.id, ...relatedIds(media)].find((id) => claimed.has(id))
       if (clash) {
-        setNotice({ kind: 'error', text: `Already counted — ${anime.title} is part of ${claimed.get(clash)}.` })
+        setNotice({ kind: 'repeat', text: repeatMessage(anime.title, claimed.get(clash)) })
         return 'duplicate'
       }
       if (listRef.current.length >= GOAL) return 'duplicate'
@@ -140,7 +266,7 @@ function App() {
         const clash = ids.find((id) => others.has(id))
         if (clash) {
           updateList((prev) => prev.filter((a) => a.id !== anime.id))
-          setNotice({ kind: 'error', text: `Removed ${anime.title} — it's part of ${others.get(clash)}.` })
+          setNotice({ kind: 'repeat', text: `Removed: ${repeatMessage(anime.title, others.get(clash))}` })
           return
         }
         updateList((prev) =>
@@ -172,7 +298,13 @@ function App() {
       confirmLabel: 'Start over',
       danger: true,
     })
-    if (ok) updateList(() => [])
+    if (ok) {
+      updateList(() => [])
+      setGame(newGameState())
+      setSubmitError(false)
+      setElapsedNow(0)
+      setNotice(null)
+    }
   }
 
   async function newGame() {
@@ -186,6 +318,9 @@ function App() {
       if (!ok) return
     }
     updateList(() => [])
+    setGame(newGameState())
+    setSubmitError(false)
+    setElapsedNow(0)
     setNotice(null)
     setScreen('game')
   }
@@ -195,7 +330,8 @@ function App() {
       .filter(([, n]) => n > 0)
       .map(([t, n]) => `${t.label}: ${n}`)
       .join(' · ')
-    const text = `Are You a LARPer? I named ${list.length}/${GOAL} anime for ${score} points — verdict: ${verdict.title}.\n${counts}`
+    const time = done ? ` in ${formatTime(elapsed)}` : ''
+    const text = `Are You a LARPer? ${username} named ${list.length}/${GOAL} anime${time} for ${score} points — verdict: ${verdict?.title ?? 'none'}.\n${counts}`
     try {
       await navigator.clipboard.writeText(text)
       setCopied(true)
@@ -211,16 +347,25 @@ function App() {
     }
   }
 
+  if (screen === 'leaderboard') {
+    return <Leaderboard myGameIds={myGameIds} onBack={() => setScreen('title')} />
+  }
+
   if (screen === 'title') {
     return (
       <>
         {dialog}
         <TitleScreen
           goal={GOAL}
+          minutes={TIME_LIMIT_MS / 60_000}
           named={list.length}
           score={score}
+          timeLeft={timeUp ? null : formatTime(remaining)}
           onContinue={() => setScreen('game')}
           onNewGame={newGame}
+          onLeaderboard={() => setScreen('leaderboard')}
+          username={username}
+          onUsernameChange={setUsername}
         />
       </>
     )
@@ -231,6 +376,9 @@ function App() {
       {dialog}
       <header className="game-header">
         <h1>Are You a LARPer?</h1>
+        <span className="player">
+          Playing as <b>{username}</b>
+        </span>
         <button className="ghost small" onClick={() => setScreen('title')}>
           Menu
         </button>
@@ -243,6 +391,10 @@ function App() {
             <small>/{GOAL}</small>
           </span>
           <span className="stat-label">named</span>
+        </div>
+        <div className={`stat timer${remaining <= 60_000 && !finished ? ' urgent' : ''}`}>
+          <span className="stat-value">{formatTime(Math.max(0, remaining))}</span>
+          <span className="stat-label">{timeUp ? "time's up" : done ? 'to spare' : 'left'}</span>
         </div>
         <div className="stat score">
           <span key={score} className="stat-value bump">
@@ -267,8 +419,12 @@ function App() {
         <div style={{ width: `${(list.length / GOAL) * 100}%` }} />
       </div>
 
-      <EntryInput onSubmit={add} pending={pending} disabled={done} />
-      {notice && <p className={`notice ${notice.kind}`}>{notice.text}</p>}
+      <EntryInput onSubmit={add} pending={pending} disabled={finished} timeUp={timeUp} />
+      {notice && (
+        <p key={notice.text} className={`notice ${notice.kind}`}>
+          {notice.text}
+        </p>
+      )}
 
       <ul className="legend">
         {TIERS.map((t) => (
@@ -279,10 +435,36 @@ function App() {
         ))}
       </ul>
 
-      {done && (
+      {finished && (
         <section className="finished">
-          <h2>All {GOAL} named. You are: {verdict.title}</h2>
-          <p>{verdict.blurb}</p>
+          <h2>
+            {done
+              ? `All ${GOAL} named with ${formatTime(remaining)} to spare.`
+              : `Time's up! You named ${list.length} anime.`}{' '}
+            {verdict && `You are: ${verdict.title}`}
+          </h2>
+          {verdict && <p>{verdict.blurb}</p>}
+          {supabase && list.length > 0 && (
+            <div className="submit-status">
+              {game.submitted ? (
+                <span className="notice ok">
+                  {game.rank ? `Submitted — you're #${game.rank} on the leaderboard.` : 'Submitted to the leaderboard.'}
+                </span>
+              ) : submitError ? (
+                <>
+                  <span className="notice error">Couldn't submit your score.</span>
+                  <button className="small" onClick={submit}>
+                    Retry
+                  </button>
+                </>
+              ) : (
+                <span className="notice">{settled ? 'Submitting…' : 'Finishing franchise checks…'}</span>
+              )}
+              <button className="ghost small" onClick={() => setScreen('leaderboard')}>
+                View leaderboard
+              </button>
+            </div>
+          )}
         </section>
       )}
 

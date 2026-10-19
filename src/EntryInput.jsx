@@ -26,7 +26,7 @@ const EFFECTS = {
   },
 }
 
-function EntryInput({ onSubmit, pending, disabled }) {
+function EntryInput({ onSubmit, pending, disabled, timeUp }) {
   const [value, setValue] = useState('')
   const [ghost, setGhost] = useState(null) // { id, text } of the last added name
   const ghostId = useRef(0)
@@ -57,7 +57,7 @@ function EntryInput({ onSubmit, pending, disabled }) {
       <input
         ref={inputRef}
         type="text"
-        placeholder={disabled ? 'All 100 named!' : 'Type an anime and press Enter…'}
+        placeholder={timeUp ? "Time's up!" : disabled ? 'All 100 named!' : 'Type an anime and press Enter…'}
         value={value}
         onChange={(e) => setValue(e.target.value)}
         disabled={disabled || pending}
