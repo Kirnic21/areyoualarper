@@ -14,7 +14,19 @@ create table if not exists public.scores (
   check (score <= named * 20)
 );
 
-create index if not exists scores_rank_idx on public.scores (score desc, time_ms asc);
+-- Game mode (src/modes.js); each mode has its own board. Rows from before
+-- modes existed were all 100 anime in 15 minutes, i.e. 'hard'.
+alter table public.scores add column if not exists mode text not null default 'hard';
+alter table public.scores drop constraint if exists scores_mode_check;
+alter table public.scores add constraint scores_mode_check check (
+  mode = 'hard'
+  or (mode = 'normal' and named <= 50 and time_ms <= 600000) -- 50 in 10 min
+  or (mode = 'movies' and named <= 25 and time_ms <= 600000) -- 25 in 10 min
+  or (mode = 'movies-hard' and named <= 50) -- 50 in 15 min
+);
+
+drop index if exists scores_rank_idx;
+create index if not exists scores_mode_rank_idx on public.scores (mode, score desc, time_ms asc);
 
 -- The site uses the public anon key, so access is controlled here: anyone can
 -- read the board and add a finished game, nobody can edit or delete rows.

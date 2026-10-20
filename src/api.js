@@ -2,6 +2,10 @@ const ENDPOINT = 'https://graphql.anilist.co'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
+// When AniList last asked us to back off; suggestions pause until then so
+// they don't eat into the budget for actual answers.
+let rateLimitedUntil = 0
+
 // AniList is rate limited (30–90 req/min depending on load); 429s are retried
 // after Retry-After.
 async function anilist(query, variables, signal, retries = 3) {
@@ -11,10 +15,13 @@ async function anilist(query, variables, signal, retries = 3) {
     body: JSON.stringify({ query, variables }),
     signal,
   })
-  if (res.status === 429 && retries > 0) {
+  if (res.status === 429) {
     const retryAfter = Number(res.headers.get('Retry-After')) || 2
-    await sleep(retryAfter * 1000)
-    return anilist(query, variables, signal, retries - 1)
+    rateLimitedUntil = Date.now() + retryAfter * 1000
+    if (retries > 0) {
+      await sleep(retryAfter * 1000)
+      return anilist(query, variables, signal, retries - 1)
+    }
   }
   const json = await res.json().catch(() => ({}))
   if (!res.ok || json.errors) {
@@ -39,27 +46,27 @@ const MEDIA_FIELDS = `
 
 // AniList's search gives up on any misspelled word and only prefix-matches a
 // word on its own, so one request runs several searches (as aliases): the raw
-// text, a de-pluralized version, and the longest words cut down to a prefix.
-// The best match is then picked locally, with typo tolerance.
-function searchVariants(name) {
+// text, a de-pluralized version, the longest words on their own (so one
+// misspelled word doesn't sink the rest) and the longest word cut down to a
+// prefix (so a typo near its end doesn't either). The best match is then
+// picked locally, with typo tolerance.
+export function searchVariants(name) {
   const words = normalize(name).split(' ')
-  const prefixes = words
-    .filter((w) => w.length >= 4)
-    .sort((a, b) => b.length - a.length)
-    .slice(0, 3)
-    .map((w) => w.slice(0, Math.max(4, Math.ceil(w.length * 0.6))))
+  const longest = words.filter((w) => w.length >= 4).sort((a, b) => b.length - a.length)
+  const alone = words.length > 1 ? longest.slice(0, 2) : []
+  const prefix = longest[0] && longest[0].slice(0, Math.max(4, Math.ceil(longest[0].length * 0.6)))
   // Spaces left out ("hunterxhunter") leave one long word; a short prefix of
   // it still finds the title.
-  if (words.length === 1 && words[0].length >= 8) prefixes.push(words[0].slice(0, 5))
-  return [...new Set([name, words.join(' '), ...prefixes])]
+  const short = words.length === 1 && words[0].length >= 8 ? words[0].slice(0, 5) : null
+  return [...new Set([name, words.join(' '), ...alone, prefix, short].filter(Boolean))]
 }
 
-function searchQuery(count) {
+function searchQuery(count, perPage = 20) {
   const vars = Array.from({ length: count }, (_, i) => `$q${i}: String`).join(', ')
   const pages = Array.from(
     { length: count },
     (_, i) => `
-      p${i}: Page(perPage: 20) {
+      p${i}: Page(perPage: ${perPage}) {
         media(search: $q${i}, type: ANIME, isAdult: false, sort: SEARCH_MATCH) { ...M }
       }`,
   ).join('')
@@ -89,7 +96,7 @@ export function normalize(s) {
     .join(' ')
 }
 
-const compact = (s) => s.replace(/ /g, '')
+export const compact = (s) => s.replace(/ /g, '')
 
 function editDistance(a, b) {
   if (Math.abs(a.length - b.length) > 2) return Infinity
@@ -104,36 +111,65 @@ function editDistance(a, b) {
   return prev[b.length]
 }
 
+// The names a media node goes by, normalized: `titles` (its real titles, and
+// their main part before any subtitle) and `synonyms` (user-submitted, so
+// less trustworthy: one Steins;Gate special is also listed as "Steins").
 function acceptedNames(media) {
   const { english, romaji, native } = media.title
-  const names = [english, romaji, native, ...(media.synonyms ?? [])]
-    .filter(Boolean)
-    // Ignore qualifiers like "(TV)" or "(2000)".
-    .map((n) => n.replace(/\s*\([^)]*\)\s*$/, ''))
+  const titles = [english, romaji, native]
   // Also accept the main title before a subtitle, e.g. "Re:Zero" for
   // "Re:ZERO -Starting Life in Another World-".
   for (const title of [english, romaji]) {
     const main = title?.split(/\s[-–:]|:\s|\s-/)[0]
-    if (main && main !== title) names.push(main)
+    if (main && main !== title) titles.push(main)
   }
-  return names.map((n) => compact(normalize(n))).filter((n) => n.length > 0)
+  const clean = (names) =>
+    names
+      .filter(Boolean)
+      // Ignore qualifiers like "(TV)" or "(2000)".
+      .map((n) => normalize(n.replace(/\s*\([^)]*\)\s*$/, '')))
+      .filter((n) => n.length > 0)
+  return { titles: clean(titles), synonyms: clean(media.synonyms ?? []) }
 }
 
-// How well `wanted` (normalized, compacted) matches a name: 2 exact, 1 close
-// enough (a typo or two in a longer title), 0 no match.
-function matchScore(wanted, names) {
-  if (names.includes(wanted)) return 2
-  const allowed = wanted.length >= 16 ? 2 : wanted.length >= 8 ? 1 : 0
-  if (allowed > 0 && names.some((n) => editDistance(wanted, n) <= allowed)) return 1
+// Every typed word starts a word of `name`, in order, so "mob psycho" matches
+// "Mob Psycho 100" and "jojo" matches "JoJo's Bizarre Adventure". Longer typed
+// words may have a typo.
+function wordsMatch(typed, name) {
+  const words = name.split(' ')
+  let i = 0
+  for (const t of typed) {
+    while (i < words.length && !words[i].startsWith(t) && !(t.length >= 5 && editDistance(t, words[i]) <= 1)) i++
+    if (i === words.length) return false
+    i++
+  }
+  return true
+}
+
+// How well `wanted` (normalized) matches acceptedNames(): 3 exactly a title,
+// 2 exactly a synonym or close enough to any name (a typo or two in a longer
+// title), 1 a partial name (wordsMatch), 0 no match. With `prefixes`, a name
+// that starts with `wanted` (still being typed) also scores 2.
+export function matchScore(wanted, { titles, synonyms }, prefixes = false) {
+  const target = compact(wanted)
+  const names = [...titles, ...synonyms]
+  const compacted = names.map(compact)
+  if (titles.some((n) => compact(n) === target)) return 3
+  if (compacted.includes(target)) return 2
+  const allowed = target.length >= 12 ? 2 : target.length >= 8 ? 1 : 0
+  if (allowed > 0 && compacted.some((n) => editDistance(target, n) <= allowed)) return 2
+  if (prefixes && compacted.some((n) => n.startsWith(target))) return 2
+  const typed = wanted.split(' ')
+  if (target.length >= 4 && names.some((n) => wordsMatch(typed, n))) return 1
   return 0
 }
 
 // Finds the anime the player meant by `name`: exact title matches win over
-// near matches, and the most popular wins among equals. Returns
-// { anime, media } (media is the raw AniList node, for resolveFranchise), or
-// null if nothing matches.
+// near matches and title starts, those over partial titles, and the most
+// popular wins among equals. Returns { anime, media } (media is the raw
+// AniList node, for resolveFranchise), or null if nothing matches.
 export async function findAnime(name, signal) {
-  const wanted = compact(normalize(name))
+  const wanted = normalize(name)
   if (!wanted) return null
   const variants = searchVariants(name)
   const data = await anilist(
@@ -144,13 +180,55 @@ export async function findAnime(name, signal) {
   let best = null
   let bestScore = 0
   for (const media of Object.values(data).flatMap((page) => page.media)) {
-    const score = matchScore(wanted, acceptedNames(media))
+    const score = matchScore(wanted, acceptedNames(media), true)
     if (score > bestScore || (score === bestScore && score > 0 && media.popularity > best.popularity)) {
       best = media
       bestScore = score
     }
   }
   return best && { anime: toAnime(best), media: best }
+}
+
+const SUGGESTIONS = 6
+const suggestCache = new Map()
+
+// Autocomplete for a partly typed name: up to SUGGESTIONS { anime, media }
+// results (the same shape as findAnime), best matches first and the most
+// popular first among equals. Results are cached, and nothing is fetched (or
+// retried) while AniList is rate limiting.
+export async function suggestAnime(text, signal) {
+  const wanted = normalize(text)
+  if (compact(wanted).length < 2) return []
+  if (suggestCache.has(wanted)) return suggestCache.get(wanted)
+  if (Date.now() < rateLimitedUntil) return []
+
+  // A short last word is probably still being typed; AniList can miss it.
+  const words = wanted.split(' ')
+  const variants = searchVariants(text)
+  if (words.length > 1 && words.at(-1).length < 3) variants.push(words.slice(0, -1).join(' '))
+  const unique = [...new Set(variants)]
+  const data = await anilist(
+    searchQuery(unique.length, 10),
+    Object.fromEntries(unique.map((v, i) => [`q${i}`, v])),
+    signal,
+    0,
+  )
+
+  const seen = new Set()
+  const ranked = []
+  for (const media of Object.values(data).flatMap((page) => page.media)) {
+    if (seen.has(media.id)) continue
+    seen.add(media.id)
+    const score = matchScore(wanted, acceptedNames(media), true)
+    // The extra searches turn up plenty of unrelated shows.
+    if (score > 0) ranked.push({ score, media })
+  }
+  ranked.sort((a, b) => b.score - a.score || b.media.popularity - a.media.popularity)
+  const results = ranked.slice(0, SUGGESTIONS).map(({ media }) => ({ anime: toAnime(media), media }))
+
+  if (suggestCache.size > 200) suggestCache.delete(suggestCache.keys().next().value)
+  suggestCache.set(wanted, results)
+  return results
 }
 
 const RELATIONS_QUERY = `

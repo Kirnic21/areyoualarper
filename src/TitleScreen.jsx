@@ -1,6 +1,42 @@
-import { TIERS } from './scoring.js'
+import { CATEGORIES, DIFFICULTIES, findMode } from './modes.js'
+import { tmdbConfigured } from './tmdb.js'
 
-function TitleScreen({ goal, minutes, named, score, timeLeft, onContinue, onNewGame, onLeaderboard, username, onUsernameChange }) {
+// A row of radio options ({ id, label, detail? }) styled as cards.
+function Choice({ legend, options, value, onChange }) {
+  return (
+    <fieldset className="mode-picker">
+      <legend>{legend}</legend>
+      {options.map((o) => (
+        <label key={o.id} className={o.id === value ? 'selected' : undefined}>
+          <input
+            type="radio"
+            name={legend}
+            value={o.id}
+            checked={o.id === value}
+            onChange={() => onChange(o.id)}
+          />
+          <b>{o.label}</b>
+          {o.detail && <small>{o.detail}</small>}
+        </label>
+      ))}
+    </fieldset>
+  )
+}
+
+// `mode` is the saved game's mode; `nextMode` the one picked for a new game.
+function TitleScreen({
+  mode,
+  nextMode,
+  onNextModeChange,
+  named,
+  score,
+  timeLeft,
+  onContinue,
+  onNewGame,
+  onLeaderboard,
+  username,
+  onUsernameChange,
+}) {
   const hasSave = named > 0
   const hasName = username.trim().length > 0
 
@@ -17,36 +53,32 @@ function TitleScreen({ goal, minutes, named, score, timeLeft, onContinue, onNewG
     <div className="title-screen">
       <div className="title-glow" aria-hidden="true" />
 
-      <p className="kicker">The anime obscurity test</p>
       <h1 className="title-logo">
         Are You a <span>LARPer?</span>
       </h1>
-      <p className="title-sub">Anyone can say they watch anime. Prove it.</p>
-
-      <ol className="rules">
-        <li>
-          <b>
-            Name {goal} anime in {minutes} minutes
-          </b> — type a title and press Enter.
-        </li>
-        <li>
-          <b>One per franchise.</b> Seasons, movies and spin-off OVAs don't count twice.
-        </li>
-        <li>
-          <b>The more obscure, the more points.</b> Mainstream hits are worth almost nothing.
-        </li>
-      </ol>
-
-      <ul className="title-tiers">
-        {TIERS.map((t) => (
-          <li key={t.label} style={{ '--tier': t.color }}>
-            <span>{t.label}</span>
-            <b>+{t.points}</b>
-          </li>
-        ))}
-      </ul>
+      <p className="title-sub">
+        Name {nextMode.goal} {nextMode.noun} in {nextMode.minutes} minutes. The more obscure, the more points.
+      </p>
 
       <form className="title-form" onSubmit={handleSubmit}>
+        {CATEGORIES.length > 1 && (
+          <Choice
+            legend="Category"
+            options={CATEGORIES.map((c) => ({ id: c.id, label: c.label }))}
+            value={nextMode.category}
+            onChange={(category) => onNextModeChange(findMode(category, nextMode.difficulty).id)}
+          />
+        )}
+        <Choice
+          legend="Difficulty"
+          options={DIFFICULTIES.map((d) => {
+            const m = findMode(nextMode.category, d.id)
+            return { id: d.id, label: d.label, detail: `${m.goal} ${m.noun} · ${m.minutes} min` }
+          })}
+          value={nextMode.difficulty}
+          onChange={(difficulty) => onNextModeChange(findMode(nextMode.category, difficulty).id)}
+        />
+
         <label className="name-field">
           <span>Your name</span>
           <input
@@ -67,7 +99,7 @@ function TitleScreen({ goal, minutes, named, score, timeLeft, onContinue, onNewG
               <button type="submit" className="start" disabled={!hasName} autoFocus={hasName}>
                 {timeLeft ? 'Continue' : 'See results'}{' '}
                 <small>
-                  {named}/{goal} · {score} pts{timeLeft && ` · ${timeLeft} left`}
+                  {mode.label} · {named}/{mode.goal} · {score} pts{timeLeft && ` · ${timeLeft} left`}
                 </small>
               </button>
               <button
@@ -95,7 +127,15 @@ function TitleScreen({ goal, minutes, named, score, timeLeft, onContinue, onNewG
       </button>
 
       <p className="title-foot">
-        Popularity data from <a href="https://anilist.co">AniList</a>.
+        Popularity data from <a href="https://anilist.co">AniList</a>
+        {tmdbConfigured && (
+          <>
+            {' '}
+            and <a href="https://www.themoviedb.org">TMDB</a>. This product uses the TMDB API but is not endorsed or
+            certified by TMDB
+          </>
+        )}
+        .
       </p>
     </div>
   )

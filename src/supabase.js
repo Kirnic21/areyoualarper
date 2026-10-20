@@ -10,10 +10,11 @@ export const supabase = configured ? createClient(url, key) : null
 
 export const LEADERBOARD_SIZE = 50
 
-export async function submitScore({ gameId, username, score, named, timeMs, verdict }) {
+export async function submitScore({ gameId, mode, username, score, named, timeMs, verdict }) {
   if (!supabase) return
   const { error } = await supabase.from('scores').insert({
     game_id: gameId,
+    mode,
     username,
     score,
     named,
@@ -24,12 +25,13 @@ export async function submitScore({ gameId, username, score, named, timeMs, verd
   if (error && error.code !== '23505') throw error
 }
 
-// Best scores first; ties go to the faster run.
-export async function fetchLeaderboard() {
+// Best scores in a mode first; ties go to the faster run.
+export async function fetchLeaderboard(mode) {
   if (!supabase) throw new Error('Leaderboard not configured')
   const { data, error } = await supabase
     .from('scores')
     .select('game_id, username, score, named, time_ms, verdict, created_at')
+    .eq('mode', mode)
     .order('score', { ascending: false })
     .order('time_ms', { ascending: true })
     .limit(LEADERBOARD_SIZE)
@@ -37,12 +39,13 @@ export async function fetchLeaderboard() {
   return data
 }
 
-// 1-based position a score would have on the full board.
-export async function fetchRank(score, timeMs) {
+// 1-based position a score would have on the mode's full board.
+export async function fetchRank(mode, score, timeMs) {
   if (!supabase) return null
   const { count, error } = await supabase
     .from('scores')
     .select('id', { count: 'exact', head: true })
+    .eq('mode', mode)
     .or(`score.gt.${score},and(score.eq.${score},time_ms.lt.${Math.round(timeMs)})`)
   if (error) throw error
   return count + 1

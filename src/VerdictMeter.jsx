@@ -1,14 +1,17 @@
-import { MAX_AVERAGE, VERDICTS, averagePoints, verdictFor } from './scoring.js'
+import { MAX_AVERAGE, averagePoints, verdictFor } from './scoring.js'
 
 // Verdicts lowest first, each spanning from its threshold to the next one.
-const SEGMENTS = [...VERDICTS].reverse().map((v, i, all) => ({
-  ...v,
-  max: all[i + 1]?.min ?? MAX_AVERAGE,
-}))
+function segments(verdicts) {
+  return [...verdicts].reverse().map((v, i, all) => ({
+    ...v,
+    max: all[i + 1]?.min ?? MAX_AVERAGE,
+  }))
+}
 
-function VerdictMeter({ list }) {
-  const verdict = verdictFor(list)
-  const avg = averagePoints(list)
+function VerdictMeter({ list, scale, verdicts }) {
+  const SEGMENTS = segments(verdicts)
+  const verdict = verdictFor(list, scale, verdicts)
+  const avg = averagePoints(list, scale)
   const next = SEGMENTS.find((s) => s.min > avg)
   const position = Math.min(100, (avg / MAX_AVERAGE) * 100)
 

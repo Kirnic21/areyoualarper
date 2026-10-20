@@ -1,24 +1,51 @@
 import { useEffect, useState } from 'react'
 import { LEADERBOARD_SIZE, fetchLeaderboard, supabase } from './supabase.js'
-import { VERDICTS } from './scoring.js'
+import { MOVIE_VERDICTS, VERDICTS } from './scoring.js'
+import { CATEGORIES, DIFFICULTIES, findMode, modeFor } from './modes.js'
 
-const verdictColor = (title) => VERDICTS.find((v) => v.title === title)?.color ?? 'var(--muted)'
+const verdictColor = (title) => [...VERDICTS, ...MOVIE_VERDICTS].find((v) => v.title === title)?.color ?? 'var(--muted)'
 
 function formatTime(ms) {
   const total = Math.round(ms / 1000)
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
 }
 
-function Leaderboard({ myGameIds, onBack }) {
+// A row of tab buttons ({ id, label, detail? }).
+function Tabs({ options, value, onChange }) {
+  return (
+    <div className="mode-tabs" role="tablist">
+      {options.map((o) => (
+        <button
+          key={o.id}
+          role="tab"
+          aria-selected={o.id === value}
+          className={`small${o.id === value ? '' : ' ghost'}`}
+          onClick={() => onChange(o.id)}
+        >
+          {o.label} {o.detail && <small>{o.detail}</small>}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function Leaderboard({ myGameIds, initialMode, onBack }) {
+  const [mode, setMode] = useState(() => modeFor(initialMode))
   const [rows, setRows] = useState(null)
   const [error, setError] = useState(supabase ? null : 'The leaderboard isn’t set up yet.')
 
   useEffect(() => {
     if (!supabase) return
-    fetchLeaderboard()
-      .then(setRows)
-      .catch(() => setError('Couldn’t load the leaderboard. Try again in a moment.'))
-  }, [])
+    let current = true
+    setRows(null)
+    setError(null)
+    fetchLeaderboard(mode.id)
+      .then((data) => current && setRows(data))
+      .catch(() => current && setError('Couldn’t load the leaderboard. Try again in a moment.'))
+    return () => {
+      current = false
+    }
+  }, [mode])
 
   return (
     <div className="app leaderboard">
@@ -28,6 +55,22 @@ function Leaderboard({ myGameIds, onBack }) {
           Back
         </button>
       </header>
+
+      {CATEGORIES.length > 1 && (
+        <Tabs
+          options={CATEGORIES}
+          value={mode.category}
+          onChange={(category) => setMode(findMode(category, mode.difficulty))}
+        />
+      )}
+      <Tabs
+        options={DIFFICULTIES.map((d) => {
+          const m = findMode(mode.category, d.id)
+          return { id: d.id, label: d.label, detail: `${m.goal} in ${m.minutes} min` }
+        })}
+        value={mode.difficulty}
+        onChange={(difficulty) => setMode(findMode(mode.category, difficulty))}
+      />
 
       <p className="tagline">Top {LEADERBOARD_SIZE} finished runs. Ties go to the faster run.</p>
 
@@ -48,7 +91,7 @@ function Leaderboard({ myGameIds, onBack }) {
                 {r.verdict}
               </span>
               <span className="board-meta">
-                {r.named}/100 · {formatTime(r.time_ms)}
+                {r.named}/{mode.goal} · {formatTime(r.time_ms)}
               </span>
               <span className="board-score">{r.score}</span>
             </li>
